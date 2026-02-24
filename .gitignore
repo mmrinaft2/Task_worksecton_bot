@@ -1,5 +1,5 @@
 # Environment variables
-.env
+# .env  # Commented to track bot token
 .env.local
 .env.*.local
 
