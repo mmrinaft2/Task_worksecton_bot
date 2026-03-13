@@ -19,8 +19,12 @@ load_dotenv()
 
 logger = logging.getLogger(__name__)
 
-WORKSECTION_API_KEY = os.getenv('WORKSECTION_API_KEY', '')
-WORKSECTION_ACCOUNT_URL = os.getenv('WORKSECTION_ACCOUNT_URL', '').rstrip('/')
+WORKSECTION_API_KEY = os.getenv('WORKSECTION_API_KEY', '') or os.getenv('WORKSECTION_API_TOKEN', '')
+_account_url = os.getenv('WORKSECTION_ACCOUNT_URL', '')
+_account_domain = os.getenv('WS_ACCOUNT_DOMAIN', '')
+if not _account_url and _account_domain:
+    _account_url = f"https://{_account_domain}"
+WORKSECTION_ACCOUNT_URL = _account_url.rstrip('/')
 
 
 class WorksectionAPI:
@@ -64,20 +68,27 @@ class WorksectionAPI:
             return {'status': 'error', 'message': str(e)}
 
     def _post_request(self, params: dict, files: Optional[dict] = None) -> dict:
-        """Make POST API request (for creating tasks with attachments)"""
-        query_string = urlencode(params)
+        """GET for simple requests, POST when files or long text attached"""
+        if not files and 'text' not in params:
+            return self._request(params)
+
+        # Separate short params (for URL/hash) from long params (for POST body)
+        post_data = {}
+        url_params = {}
+        for k, v in params.items():
+            if k == 'text':
+                post_data[k] = v
+            else:
+                url_params[k] = v
+
+        query_string = urlencode(url_params)
         hash_value = self._make_hash(query_string)
-        params['hash'] = hash_value
 
         self._rate_limit()
 
         try:
-            response = requests.post(
-                self.base_url,
-                data=params,
-                files=files,
-                timeout=30
-            )
+            url = f"{self.base_url}?{query_string}&hash={hash_value}"
+            response = requests.post(url, data=post_data, files=files, timeout=60)
             response.raise_for_status()
             data = response.json()
 
@@ -108,6 +119,7 @@ class WorksectionAPI:
         email_user_to: str = '',
         tags: str = '',
         dateend: str = '',
+        files: Optional[dict] = None,
     ) -> dict:
         """Create a task in Worksection"""
         params = {
@@ -126,7 +138,7 @@ class WorksectionAPI:
         if dateend:
             params['dateend'] = dateend
 
-        return self._post_request(params)
+        return self._post_request(params, files=files)
 
     def get_task(self, id_task: int) -> dict:
         """Get single task details"""

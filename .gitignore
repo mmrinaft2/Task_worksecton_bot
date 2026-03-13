@@ -1,5 +1,5 @@
 # Environment variables
-# .env  # Commented to track bot token
+.env
 .env.local
 .env.*.local
 
@@ -29,6 +29,7 @@ wheels/
 *.egg
 
 # IDE
+.vs/
 .vscode/
 .idea/
 *.swp
