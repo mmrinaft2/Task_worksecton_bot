@@ -1,151 +1,76 @@
-"""
-Worksection API Client
-Authentication via MD5 hash: md5(query_params + api_key)
-Base URL: https://{account}.worksection.com/api/admin/v2/
-Rate limit: 1 request/sec
-"""
-
 import os
-import hashlib
-import logging
 import time
-from typing import Optional
-from urllib.parse import urlencode
-
+import hashlib
 import requests
-from dotenv import load_dotenv
-
-load_dotenv()
+import logging
 
 logger = logging.getLogger(__name__)
-
-WORKSECTION_API_KEY = os.getenv('WORKSECTION_API_KEY', '') or os.getenv('WORKSECTION_API_TOKEN', '')
-_account_url = os.getenv('WORKSECTION_ACCOUNT_URL', '')
-_account_domain = os.getenv('WS_ACCOUNT_DOMAIN', '')
-if not _account_url and _account_domain:
-    _account_url = f"https://{_account_domain}"
-WORKSECTION_ACCOUNT_URL = _account_url.rstrip('/')
 
 
 class WorksectionAPI:
     def __init__(self):
-        self.api_key = WORKSECTION_API_KEY
-        self.base_url = f"{WORKSECTION_ACCOUNT_URL}/api/admin/v2/"
+        self.api_key = os.getenv('WORKSECTION_API_TOKEN') or os.getenv('WORKSECTION_API_KEY')
+        domain = os.getenv('WS_ACCOUNT_DOMAIN') or os.getenv('WORKSECTION_ACCOUNT_URL', '')
+        if domain and not domain.startswith('http'):
+            domain = f"https://{domain}"
+        self.account_url = domain.rstrip('/')
         self._last_request_time = 0
 
-    def _make_hash(self, query_params: str) -> str:
-        """Calculate MD5 hash: md5(query_params + api_key)"""
-        raw = query_params + self.api_key
+    def _make_hash(self, params: str) -> str:
+        """Generate MD5 hash for authentication"""
+        raw = params + self.api_key
         return hashlib.md5(raw.encode('utf-8')).hexdigest()
 
     def _rate_limit(self):
         """Ensure at least 1 second between requests"""
-        now = time.time()
-        elapsed = now - self._last_request_time
+        elapsed = time.time() - self._last_request_time
         if elapsed < 1.0:
             time.sleep(1.0 - elapsed)
         self._last_request_time = time.time()
 
-    def _request(self, params: dict) -> dict:
-        """Make API request with hash authentication"""
-        query_string = urlencode(params)
-        hash_value = self._make_hash(query_string)
-        params['hash'] = hash_value
+    def _request(self, params: dict, files: dict = None) -> dict:
+        """Make API request to Worksection"""
+        if not self.api_key or not self.account_url:
+            logger.error("Worksection API key or URL not configured")
+            return {'status': 'error', 'message': 'API not configured'}
 
         self._rate_limit()
 
+        # Build query string for hash (without files)
+        query_parts = [f"{k}={v}" for k, v in sorted(params.items())]
+        query_str = '&'.join(query_parts)
+        params['hash'] = self._make_hash(query_str)
+
+        url = f"{self.account_url}/api/admin/v2/"
+
         try:
-            response = requests.get(self.base_url, params=params, timeout=30)
-            response.raise_for_status()
-            data = response.json()
-
-            if data.get('status') != 'ok':
-                logger.error(f"Worksection API error: {data}")
-            return data
-
-        except requests.RequestException as e:
-            logger.error(f"Worksection API request failed: {e}")
-            return {'status': 'error', 'message': str(e)}
-
-    def _post_request(self, params: dict, files: Optional[dict] = None) -> dict:
-        """GET for simple requests, POST when files or long text attached"""
-        if not files and 'text' not in params:
-            return self._request(params)
-
-        # Separate short params (for URL/hash) from long params (for POST body)
-        post_data = {}
-        url_params = {}
-        for k, v in params.items():
-            if k == 'text':
-                post_data[k] = v
+            if files:
+                response = requests.post(url, data=params, files=files, timeout=30)
             else:
-                url_params[k] = v
-
-        query_string = urlencode(url_params)
-        hash_value = self._make_hash(query_string)
-
-        self._rate_limit()
-
-        try:
-            url = f"{self.base_url}?{query_string}&hash={hash_value}"
-            response = requests.post(url, data=post_data, files=files, timeout=60)
+                response = requests.post(url, data=params, timeout=30)
             response.raise_for_status()
-            data = response.json()
-
-            if data.get('status') != 'ok':
-                logger.error(f"Worksection API error: {data}")
-            return data
-
-        except requests.RequestException as e:
+            return response.json()
+        except requests.exceptions.RequestException as e:
             logger.error(f"Worksection API request failed: {e}")
             return {'status': 'error', 'message': str(e)}
 
-    def get_projects(self, filter_type: str = 'active') -> list:
-        """Get list of projects"""
-        result = self._request({
-            'action': 'get_projects',
-            'filter': filter_type,
-        })
-        if result.get('status') == 'ok':
-            return result.get('data', [])
-        return []
+    def get_projects(self) -> dict:
+        """Get list of active projects"""
+        return self._request({'action': 'get_projects'})
 
-    def post_task(
-        self,
-        id_project: int,
-        title: str,
-        text: str = '',
-        priority: int = 5,
-        email_user_to: str = '',
-        tags: str = '',
-        dateend: str = '',
-        files: Optional[dict] = None,
-    ) -> dict:
+    def post_task(self, id_project: int, title: str, text: str = '',
+                  priority: int = 5, dateend: str = '', files: dict = None) -> dict:
         """Create a task in Worksection"""
         params = {
             'action': 'post_task',
-            'id_project': id_project,
+            'id_project': str(id_project),
             'title': title,
         }
         if text:
             params['text'] = text
-        if priority is not None:
-            params['priority'] = priority
-        if email_user_to:
-            params['email_user_to'] = email_user_to
-        if tags:
-            params['tags'] = tags
+        if priority:
+            params['priority'] = str(priority)
         if dateend:
             params['dateend'] = dateend
 
-        return self._post_request(params, files=files)
-
-    def get_task(self, id_task: int) -> dict:
-        """Get single task details"""
-        result = self._request({
-            'action': 'get_task',
-            'id_task': id_task,
-        })
-        if result.get('status') == 'ok':
-            return result.get('data', {})
-        return {}
+        return self._request(params, files=files)

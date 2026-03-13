@@ -2,7 +2,6 @@
 """
 Odoo Task Management Bot for Telegram
 Converts user descriptions into well-structured technical specifications
-and creates tasks in Worksection
 """
 
 import os
@@ -10,7 +9,8 @@ import re
 import json
 import logging
 import tempfile
-from datetime import datetime
+import calendar
+from datetime import datetime, date
 from typing import Dict, List, Optional
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputFile
@@ -25,8 +25,6 @@ from telegram.ext import (
 import langdetect
 from langdetect import detect
 
-from worksection_api import WorksectionAPI
-
 # Load environment variables
 load_dotenv()
 
@@ -40,7 +38,13 @@ logger = logging.getLogger(__name__)
 # Bot token from environment
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 
-# Worksection API client
+# Worksection project ID
+WS_PROJECT_ID = 222684
+WS_PROJECT_NAME = 'Odoo'
+
+from worksection_api import WorksectionAPI
+from ai_agent import get_clarifying_questions, generate_spec
+
 ws_api = WorksectionAPI()
 
 # Language-specific strings
@@ -62,26 +66,8 @@ TRANSLATIONS = {
         'confirm': '✅ Так, все правильно',
         'edit': '✏️ Редагувати',
         'cancel': '❌ Скасувати',
-        'ts_confirmed': '✅ ТЗ прийнято!',
+        'ts_confirmed': '✅ ТЗ прийнято! \n\nНаступний крок: інтеграція з WorkSection/Odoo',
         'ts_cancelled': '❌ ТЗ скасовано.',
-        'select_priority': '🔥 Наскільки це терміново?',
-        'priority_low': '🟢 Низький (1-2)',
-        'priority_normal': '🔵 Нормальний (3-4)',
-        'priority_medium': '🟡 Середній (5-6)',
-        'priority_high': '🟠 Високий (7-8)',
-        'priority_critical': '🔴 Критичний (9-10)',
-        'select_project': '📂 Вибери проект у Worksection:',
-        'no_projects': '⚠️ Не вдалося отримати список проектів. Перевір налаштування API.',
-        'creating_task': '⏳ Створюю задачу у Worksection...',
-        'task_created': '✅ Задачу створено у Worksection!\n\n📂 Проект: {project}\n📌 Пріоритет: {priority}\n🔗 Посилання: {link}',
-        'task_error': '❌ Помилка при створенні задачі: {error}',
-        'ask_deadline': '📅 Який термін виконання? (формат: ДД.ММ.РРРР)\n\nНаприклад: 25.03.2026\n\nАбо напиши "пропустити" щоб не вказувати.',
-        'deadline_set': '📅 Термін: {deadline}',
-        'deadline_skipped': '📅 Без терміну',
-        'deadline_invalid': '⚠️ Невірний формат дати. Спробуй ще раз (ДД.ММ.РРРР):',
-        'ask_links': '🔗 Є посилання для перегляду? (URL сторінок, скрінів тощо)\n\nНадішли посилання або напиши "пропустити".',
-        'links_added': '🔗 Посилання додано: {count}',
-        'links_skipped': '🔗 Без посилань',
     },
     'en': {
         'start': 'Hello! 👋\n\nI will help you create a detailed technical specification for Odoo.\n\nDescribe the problem or idea you want to implement.',
@@ -100,26 +86,8 @@ TRANSLATIONS = {
         'confirm': '✅ Yes, all correct',
         'edit': '✏️ Edit',
         'cancel': '❌ Cancel',
-        'ts_confirmed': '✅ Specification accepted!',
+        'ts_confirmed': '✅ Specification accepted! \n\nNext step: integration with WorkSection/Odoo',
         'ts_cancelled': '❌ Specification cancelled.',
-        'select_priority': '🔥 How urgent is this?',
-        'priority_low': '🟢 Low (1-2)',
-        'priority_normal': '🔵 Normal (3-4)',
-        'priority_medium': '🟡 Medium (5-6)',
-        'priority_high': '🟠 High (7-8)',
-        'priority_critical': '🔴 Critical (9-10)',
-        'select_project': '📂 Select a Worksection project:',
-        'no_projects': '⚠️ Could not fetch project list. Check API settings.',
-        'creating_task': '⏳ Creating task in Worksection...',
-        'task_created': '✅ Task created in Worksection!\n\n📂 Project: {project}\n📌 Priority: {priority}\n🔗 Link: {link}',
-        'task_error': '❌ Error creating task: {error}',
-        'ask_deadline': '📅 What is the deadline? (format: DD.MM.YYYY)\n\nExample: 25.03.2026\n\nOr type "skip" to skip.',
-        'deadline_set': '📅 Deadline: {deadline}',
-        'deadline_skipped': '📅 No deadline',
-        'deadline_invalid': '⚠️ Invalid date format. Try again (DD.MM.YYYY):',
-        'ask_links': '🔗 Any links to review? (page URLs, screenshots, etc.)\n\nSend links or type "skip".',
-        'links_added': '🔗 Links added: {count}',
-        'links_skipped': '🔗 No links',
     },
     'ru': {
         'start': 'Привет! 👋\n\nЯ помогу тебе создать детальное техническое задание для Odoo.\n\nОпиши проблему или идею, которую ты хочешь реализовать.',
@@ -138,81 +106,9 @@ TRANSLATIONS = {
         'confirm': '✅ Да, все правильно',
         'edit': '✏️ Редактировать',
         'cancel': '❌ Отменить',
-        'ts_confirmed': '✅ ТЗ принято!',
+        'ts_confirmed': '✅ ТЗ принято! \n\nСледующий шаг: интеграция с WorkSection/Odoo',
         'ts_cancelled': '❌ ТЗ отменено.',
-        'select_priority': '🔥 Насколько это срочно?',
-        'priority_low': '🟢 Низкий (1-2)',
-        'priority_normal': '🔵 Нормальный (3-4)',
-        'priority_medium': '🟡 Средний (5-6)',
-        'priority_high': '🟠 Высокий (7-8)',
-        'priority_critical': '🔴 Критический (9-10)',
-        'select_project': '📂 Выбери проект в Worksection:',
-        'no_projects': '⚠️ Не удалось получить список проектов. Проверь настройки API.',
-        'creating_task': '⏳ Создаю задачу в Worksection...',
-        'task_created': '✅ Задача создана в Worksection!\n\n📂 Проект: {project}\n📌 Приоритет: {priority}\n🔗 Ссылка: {link}',
-        'task_error': '❌ Ошибка при создании задачи: {error}',
-        'ask_deadline': '📅 Какой срок выполнения? (формат: ДД.ММ.ГГГГ)\n\nНапример: 25.03.2026\n\nИли напиши "пропустить" чтобы не указывать.',
-        'deadline_set': '📅 Срок: {deadline}',
-        'deadline_skipped': '📅 Без срока',
-        'deadline_invalid': '⚠️ Неверный формат даты. Попробуй ещё раз (ДД.ММ.ГГГГ):',
-        'ask_links': '🔗 Есть ссылки для просмотра? (URL страниц, скринов и т.д.)\n\nОтправь ссылки или напиши "пропустить".',
-        'links_added': '🔗 Ссылки добавлены: {count}',
-        'links_skipped': '🔗 Без ссылок',
-    },
-    'pl': {
-        'start': 'Cześć! 👋\n\nPomogę Ci stworzyć szczegółową specyfikację techniczną dla Odoo.\n\nOpisz problem lub pomysł, który chcesz zrealizować.',
-        'select_category': '🎯 Wybierz kategorię:',
-        'bug': '🐛 Bug (błąd)',
-        'feature': '✨ Feature (nowa funkcja)',
-        'improvement': '⚡ Improvement (ulepszenie)',
-        'support': '🆘 Support (wsparcie techniczne)',
-        'wait_description': 'Czekam na Twój opis...',
-        'questions_for_category': 'Aby specyfikacja była bardziej szczegółowa, odpowiedz na kilka pytań:',
-        'provide_answer': 'Twoja odpowiedź (lub napisz "pomiń" aby przejść dalej):',
-        'file_uploaded': '✅ Plik przesłany: {filename}',
-        'generating_ts': '⏳ Generuję specyfikację techniczną...',
-        'ts_generated': '📋 Oto gotowa specyfikacja:\n\n',
-        'confirm_ts': 'Wszystko w porządku? Kliknij przycisk:',
-        'confirm': '✅ Tak, wszystko poprawnie',
-        'edit': '✏️ Edytuj',
-        'cancel': '❌ Anuluj',
-        'ts_confirmed': '✅ Specyfikacja zatwierdzona!',
-        'ts_cancelled': '❌ Specyfikacja anulowana.',
-        'select_priority': '🔥 Jak pilne jest to zadanie?',
-        'priority_low': '🟢 Niski (1-2)',
-        'priority_normal': '🔵 Normalny (3-4)',
-        'priority_medium': '🟡 Średni (5-6)',
-        'priority_high': '🟠 Wysoki (7-8)',
-        'priority_critical': '🔴 Krytyczny (9-10)',
-        'select_project': '📂 Wybierz projekt w Worksection:',
-        'no_projects': '⚠️ Nie udało się pobrać listy projektów. Sprawdź ustawienia API.',
-        'creating_task': '⏳ Tworzę zadanie w Worksection...',
-        'task_created': '✅ Zadanie utworzone w Worksection!\n\n📂 Projekt: {project}\n📌 Priorytet: {priority}\n🔗 Link: {link}',
-        'task_error': '❌ Błąd przy tworzeniu zadania: {error}',
-        'ask_deadline': '📅 Jaki jest termin realizacji? (format: DD.MM.RRRR)\n\nNa przykład: 25.03.2026\n\nLub napisz "pomiń" aby pominąć.',
-        'deadline_set': '📅 Termin: {deadline}',
-        'deadline_skipped': '📅 Bez terminu',
-        'deadline_invalid': '⚠️ Nieprawidłowy format daty. Spróbuj ponownie (DD.MM.RRRR):',
-        'ask_links': '🔗 Czy są linki do przejrzenia? (URL stron, zrzuty ekranu itp.)\n\nWyślij linki lub napisz "pomiń".',
-        'links_added': '🔗 Linki dodane: {count}',
-        'links_skipped': '🔗 Bez linków',
     }
-}
-
-# Priority mapping: callback_data -> (value, label)
-PRIORITY_MAP = {
-    'priority_low': 2,
-    'priority_normal': 4,
-    'priority_medium': 6,
-    'priority_high': 8,
-    'priority_critical': 10,
-}
-
-PRIORITY_LABELS = {
-    'uk': {2: 'Низький', 4: 'Нормальний', 6: 'Середній', 8: 'Високий', 10: 'Критичний'},
-    'en': {2: 'Low', 4: 'Normal', 6: 'Medium', 8: 'High', 10: 'Critical'},
-    'ru': {2: 'Низкий', 4: 'Нормальный', 6: 'Средний', 8: 'Высокий', 10: 'Критический'},
-    'pl': {2: 'Niski', 4: 'Normalny', 6: 'Średni', 8: 'Wysoki', 10: 'Krytyczny'},
 }
 
 # Category-specific questions
@@ -235,12 +131,6 @@ CATEGORY_QUESTIONS = {
             '📍 Как воспроизвести проблему? (Пошагово)',
             '🎯 Какой ожидаемый результат?',
             '⚠️ Какие данные/настройки используются?',
-        ],
-        'pl': [
-            '🐛 W którym module Odoo występuje błąd?',
-            '📍 Jak odtworzyć problem? (Krok po kroku)',
-            '🎯 Jaki jest oczekiwany rezultat?',
-            '⚠️ Jakie dane/ustawienia są używane?',
         ]
     },
     'feature': {
@@ -261,12 +151,6 @@ CATEGORY_QUESTIONS = {
             '👥 Кто будет это использовать?',
             '🔧 Как это должно интегрироваться с Odoo?',
             '📊 Какие данные нужны для этого?',
-        ],
-        'pl': [
-            '✨ Jaki jest cel tej funkcji?',
-            '👥 Kto będzie z tego korzystać?',
-            '🔧 Jak ma się to integrować z Odoo?',
-            '📊 Jakie dane są potrzebne?',
         ]
     },
     'improvement': {
@@ -287,12 +171,6 @@ CATEGORY_QUESTIONS = {
             '🎯 Почему это важно?',
             '📈 Как это будет измеряться (скорость, удобство...)?',
             '🔄 Как это влияет на текущий workflow?',
-        ],
-        'pl': [
-            '⚡ Co trzeba ulepszyć?',
-            '🎯 Dlaczego to jest ważne?',
-            '📈 Jak to będzie mierzone (szybkość, wygoda...)?',
-            '🔄 Jak to wpływa na obecny workflow?',
         ]
     },
     'support': {
@@ -313,22 +191,199 @@ CATEGORY_QUESTIONS = {
             '🔍 Что ты уже попробовал(а)?',
             '⚙️ Какие настройки Odoo у тебя?',
             '📝 Какой ожидаемый результат?',
-        ],
-        'pl': [
-            '🆘 Jakie masz pytanie?',
-            '🔍 Co już próbowałeś/aś?',
-            '⚙️ Jakie masz ustawienia Odoo?',
-            '📝 Jaki jest oczekiwany rezultat?',
         ]
     }
 }
+
+
+def _reset_task_data(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Reset all task-related data for next task"""
+    context.user_data['description'] = None
+    context.user_data['category'] = None
+    context.user_data['answers'] = {}
+    context.user_data['files'] = []
+    context.user_data['file_ids'] = []
+    context.user_data['links'] = []
+    context.user_data['priority'] = 5
+    context.user_data['deadline'] = ''
+    context.user_data['current_question_index'] = 0
+
+
+MONTH_NAMES = {
+    'uk': ['Січень','Лютий','Березень','Квітень','Травень','Червень',
+           'Липень','Серпень','Вересень','Жовтень','Листопад','Грудень'],
+    'en': ['January','February','March','April','May','June',
+           'July','August','September','October','November','December'],
+    'ru': ['Январь','Февраль','Март','Апрель','Май','Июнь',
+           'Июль','Август','Сентябрь','Октябрь','Ноябрь','Декабрь'],
+}
+
+DAY_NAMES = {
+    'uk': ['Пн','Вт','Ср','Чт','Пт','Сб','Нд'],
+    'en': ['Mo','Tu','We','Th','Fr','Sa','Su'],
+    'ru': ['Пн','Вт','Ср','Чт','Пт','Сб','Вс'],
+}
+
+
+def build_calendar(year: int, month: int, lang: str) -> InlineKeyboardMarkup:
+    """Build an inline calendar keyboard for given month"""
+    keyboard = []
+
+    # Header: prev < Month Year > next
+    month_name = MONTH_NAMES.get(lang, MONTH_NAMES['uk'])[month - 1]
+    prev_month = month - 1 if month > 1 else 12
+    prev_year = year if month > 1 else year - 1
+    next_month = month + 1 if month < 12 else 1
+    next_year = year if month < 12 else year + 1
+
+    keyboard.append([
+        InlineKeyboardButton('◀', callback_data=f'cal_nav_{prev_year}_{prev_month:02d}'),
+        InlineKeyboardButton(f'{month_name} {year}', callback_data='cal_ignore'),
+        InlineKeyboardButton('▶', callback_data=f'cal_nav_{next_year}_{next_month:02d}'),
+    ])
+
+    # Day names row
+    day_names = DAY_NAMES.get(lang, DAY_NAMES['uk'])
+    keyboard.append([InlineKeyboardButton(d, callback_data='cal_ignore') for d in day_names])
+
+    # Days grid
+    today = date.today()
+    cal = calendar.monthcalendar(year, month)
+    for week in cal:
+        row = []
+        for day in week:
+            if day == 0:
+                row.append(InlineKeyboardButton(' ', callback_data='cal_ignore'))
+            else:
+                d = date(year, month, day)
+                label = f'*{day}*' if d == today else str(day)
+                # Block past dates
+                if d < today:
+                    row.append(InlineKeyboardButton('·', callback_data='cal_ignore'))
+                else:
+                    row.append(InlineKeyboardButton(
+                        str(day),
+                        callback_data=f'cal_day_{year}_{month:02d}_{day:02d}'
+                    ))
+        keyboard.append(row)
+
+    # Skip button
+    skip_text = {'uk': '⏭ Пропустити', 'en': '⏭ Skip', 'ru': '⏭ Пропустить'}.get(lang, '⏭ Пропустити')
+    keyboard.append([InlineKeyboardButton(skip_text, callback_data='cal_skip')])
+
+    return InlineKeyboardMarkup(keyboard)
+
+
+async def ask_deadline_calendar(message, context: ContextTypes.DEFAULT_TYPE, lang: str) -> None:
+    """Show calendar for deadline selection"""
+    today = date.today()
+    markup = build_calendar(today.year, today.month, lang)
+    ask_text = {
+        'uk': '📅 Оберіть термін виконання:',
+        'en': '📅 Select deadline:',
+        'ru': '📅 Выберите срок выполнения:',
+    }.get(lang, '📅 Оберіть термін виконання:')
+    context.user_data['status'] = 'selecting_deadline'
+    await message.reply_text(ask_text, reply_markup=markup)
+
+
+async def handle_calendar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle calendar button clicks"""
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+    lang = context.user_data.get('lang', 'uk')
+
+    if data == 'cal_ignore':
+        return
+
+    elif data.startswith('cal_nav_'):
+        # Navigate to different month
+        _, _, year, month = data.split('_')
+        markup = build_calendar(int(year), int(month), lang)
+        await query.edit_message_reply_markup(reply_markup=markup)
+
+    elif data.startswith('cal_day_'):
+        # Day selected
+        _, _, year, month, day = data.split('_')
+        selected = date(int(year), int(month), int(day))
+        deadline_str = selected.strftime('%d.%m.%Y')
+        context.user_data['deadline'] = deadline_str
+
+        deadline_label = {'uk': f'📅 Термін: {deadline_str}',
+                          'en': f'📅 Deadline: {deadline_str}',
+                          'ru': f'📅 Срок: {deadline_str}'}.get(lang, f'📅 {deadline_str}')
+        await query.edit_message_text(text=deadline_label)
+
+        # Proceed to generate TS
+        await generate_ts_after_deadline(query.message, context, lang)
+
+    elif data == 'cal_skip':
+        context.user_data['deadline'] = ''
+        skip_label = {'uk': '📅 Без терміну', 'en': '📅 No deadline', 'ru': '📅 Без срока'}.get(lang, '📅 Без терміну')
+        await query.edit_message_text(text=skip_label)
+        await generate_ts_after_deadline(query.message, context, lang)
+
+
+async def generate_ts_after_deadline(message, context: ContextTypes.DEFAULT_TYPE, lang: str) -> None:
+    """Generate AI-powered TS after deadline is set"""
+    description = context.user_data.get('description', '')
+    category = context.user_data.get('category', 'feature')
+    answers = context.user_data.get('answers', {})
+    files = context.user_data.get('files', [])
+    deadline = context.user_data.get('deadline', '')
+    questions = context.user_data.get('ai_questions') or \
+                CATEGORY_QUESTIONS.get(category, {}).get(lang, [])
+
+    # Show generating message
+    generating_text = {
+        'uk': '⏳ Генерую технічне завдання як Odoo-архітектор...',
+        'en': '⏳ Generating technical specification as Odoo architect...',
+        'ru': '⏳ Генерирую техническое задание как Odoo-архитектор...',
+    }.get(lang, '⏳ Генерую ТЗ...')
+    thinking_msg = await message.reply_text(generating_text)
+
+    # Generate spec via AI
+    title, spec_text = await generate_spec(
+        description=description,
+        category=category,
+        questions=questions,
+        answers=answers,
+        deadline=deadline,
+        lang=lang,
+    )
+
+    # Append files info if any
+    if files:
+        files_block = f"\n\n📎 **ВКЛАДЕННЯ:** {len(files)} файл(и)\n"
+        files_block += '\n'.join(f"   • {f}" for f in files)
+        spec_text += files_block
+
+    context.user_data['ts_text'] = spec_text
+    context.user_data['task_title'] = title
+    context.user_data['status'] = 'confirming_ts'
+
+    try:
+        await thinking_msg.delete()
+    except Exception:
+        pass
+
+    await message.reply_text(t('ts_generated', lang) + spec_text, parse_mode='Markdown')
+
+    keyboard = [
+        [InlineKeyboardButton(t('confirm', lang), callback_data='confirm_ts')],
+        [InlineKeyboardButton(t('edit', lang), callback_data='edit_ts')],
+        [InlineKeyboardButton(t('cancel', lang), callback_data='cancel_ts')],
+    ]
+    await message.reply_text(t('confirm_ts', lang), reply_markup=InlineKeyboardMarkup(keyboard))
 
 
 def get_language(user_text: str) -> str:
     """Detect user's language"""
     try:
         lang = detect(user_text)
-        lang_map = {'uk': 'uk', 'en': 'en', 'ru': 'ru', 'pl': 'pl'}
+        # Map language codes to our supported languages
+        lang_map = {'uk': 'uk', 'en': 'en', 'ru': 'ru'}
         return lang_map.get(lang, 'en')
     except:
         return 'en'
@@ -341,92 +396,77 @@ def t(key: str, lang: str, **kwargs) -> str:
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Start command — ask user to select language"""
+    """Start command"""
     user_id = update.effective_user.id
-
+    lang = 'uk'  # Default to Ukrainian
+    
     context.user_data['user_id'] = user_id
-    context.user_data['lang'] = None
-    context.user_data['status'] = 'selecting_language'
+    context.user_data['lang'] = lang
+    context.user_data['status'] = 'waiting_description'
     context.user_data['category'] = None
     context.user_data['description'] = None
     context.user_data['answers'] = {}
     context.user_data['files'] = []
-    context.user_data['priority'] = None
-    context.user_data['project_id'] = None
-
-    keyboard = [
-        [InlineKeyboardButton('🇺🇦 Українська', callback_data='lang_uk')],
-        [InlineKeyboardButton('🇬🇧 English', callback_data='lang_en')],
-        [InlineKeyboardButton('🇺🇦 Русский', callback_data='lang_ru')],
-        [InlineKeyboardButton('🇵🇱 Polski', callback_data='lang_pl')],
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text('🌐 Виберіть мову / Select language / Wybierz język:', reply_markup=reply_markup)
-
-
-async def handle_language_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle language selection"""
-    query = update.callback_query
-    await query.answer()
-
-    lang = query.data.split('_')[1]
-    context.user_data['lang'] = lang
-    context.user_data['status'] = 'waiting_description'
-
-    await query.edit_message_text(text=t('start', lang))
+    context.user_data['file_ids'] = []
+    context.user_data['links'] = []
+    context.user_data['priority'] = 5
+    context.user_data['deadline'] = ''
+    
+    await update.message.reply_text(t('start', lang))
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle incoming messages"""
     user_id = update.effective_user.id
     message_text = update.message.text
-
-    # If language not selected yet, prompt to use /start
-    if not context.user_data.get('lang'):
-        await update.message.reply_text('Please use /start to begin / Натисни /start щоб почати')
-        return
-
+    
+    # Initialize user context if not exists
+    if 'lang' not in context.user_data:
+        context.user_data['lang'] = get_language(message_text)
+        context.user_data['status'] = 'waiting_description'
+        context.user_data['user_id'] = user_id
+        context.user_data['description'] = None
+        context.user_data['answers'] = {}
+        context.user_data['category'] = None
+        context.user_data['files'] = []
+    
     lang = context.user_data.get('lang', 'uk')
     status = context.user_data.get('status', 'waiting_description')
-
+    
+    # Detect language from message
+    detected_lang = get_language(message_text)
+    if detected_lang in ['uk', 'en', 'ru']:
+        context.user_data['lang'] = detected_lang
+        lang = detected_lang
+    
     if status == 'waiting_description':
+        _reset_task_data(context)
         context.user_data['description'] = message_text
-        await ask_priority(update, context, lang)
-
-    elif status == 'waiting_deadline':
-        if message_text.lower() in ['пропустити', 'skip', 'пропустить', 'pomiń']:
-            context.user_data['deadline'] = ''
-            await update.message.reply_text(t('deadline_skipped', lang))
-            # Ask for links
-            context.user_data['status'] = 'waiting_links'
-            await update.message.reply_text(t('ask_links', lang))
+        await ask_category(update, context, lang)
+    
+    elif status == 'category_selected':
+        # Skip category re-selection, just wait for questions
+        await ask_questions(update, context)
+    
+    elif status == 'answering_questions':
+        question_index = context.user_data.get('current_question_index', 0)
+        if message_text.lower() in ['пропустити', 'skip', 'пропустить']:
+            context.user_data['answers'][question_index] = None
         else:
-            try:
-                parsed = datetime.strptime(message_text.strip(), '%d.%m.%Y')
-                context.user_data['deadline'] = message_text.strip()
-                await update.message.reply_text(t('deadline_set', lang, deadline=message_text.strip()))
-                # Ask for links
-                context.user_data['status'] = 'waiting_links'
-                await update.message.reply_text(t('ask_links', lang))
-            except ValueError:
-                await update.message.reply_text(t('deadline_invalid', lang))
+            context.user_data['answers'][question_index] = message_text
 
-    elif status == 'waiting_links':
-        if message_text.lower() in ['пропустити', 'skip', 'пропустить', 'pomiń']:
-            context.user_data['links'] = []
-            await update.message.reply_text(t('links_skipped', lang))
-            await _generate_and_confirm(update.message, context, lang)
+        question_index += 1
+        # Use AI-generated questions if available
+        questions = context.user_data.get('ai_questions') or \
+                    CATEGORY_QUESTIONS.get(context.user_data.get('category'), {}).get(lang, [])
+
+        if question_index < len(questions):
+            context.user_data['current_question_index'] = question_index
+            await update.message.reply_text(
+                f"{questions[question_index]}\n\n{t('provide_answer', lang)}"
+            )
         else:
-            # Extract URLs from message
-            urls = re.findall(r'https?://[^\s]+', message_text)
-            if not urls:
-                # Treat the whole message as a link if it looks like one
-                urls = [message_text.strip()]
-            if 'links' not in context.user_data:
-                context.user_data['links'] = []
-            context.user_data['links'].extend(urls)
-            await update.message.reply_text(t('links_added', lang, count=len(urls)))
-            await _generate_and_confirm(update.message, context, lang)
+            await generate_ts(update, context, lang)
 
 
 async def ask_category(update: Update, context: ContextTypes.DEFAULT_TYPE, lang: str) -> None:
@@ -438,13 +478,13 @@ async def ask_category(update: Update, context: ContextTypes.DEFAULT_TYPE, lang:
         [InlineKeyboardButton(t('support', lang), callback_data='category_support')],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
-
+    
     context.user_data['status'] = 'category_selected'
     await update.message.reply_text(t('select_category', lang), reply_markup=reply_markup)
 
 
 async def handle_category_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle category selection"""
+    """Handle category selection — ask AI for smart questions"""
     query = update.callback_query
     await query.answer()
 
@@ -454,16 +494,34 @@ async def handle_category_selection(update: Update, context: ContextTypes.DEFAUL
     context.user_data['status'] = 'answering_questions'
 
     lang = context.user_data.get('lang', 'uk')
-    questions = CATEGORY_QUESTIONS.get(category, {}).get(lang, [])
+    description = context.user_data.get('description', '')
 
-    if questions:
+    thinking_text = {
+        'uk': '🤔 Аналізую задачу як Odoo-архітектор...',
+        'en': '🤔 Analyzing task as Odoo architect...',
+        'ru': '🤔 Анализирую задачу как Odoo-архитектор...',
+    }.get(lang, '🤔 Аналізую...')
+
+    await query.edit_message_text(text=thinking_text)
+
+    # Get AI-generated questions
+    ai_questions = await get_clarifying_questions(description, category, lang)
+
+    # Fallback to static questions if AI fails
+    if not ai_questions:
+        ai_questions = CATEGORY_QUESTIONS.get(category, {}).get(lang, [])
+
+    context.user_data['ai_questions'] = ai_questions
+
+    if ai_questions:
+        provide_answer = t('provide_answer', lang)
         await query.edit_message_text(
             text=t('questions_for_category', lang) + '\n\n' +
-                 questions[0] + '\n\n' +
-                 t('provide_answer', lang)
+                 ai_questions[0] + '\n\n' +
+                 provide_answer
         )
     else:
-        await ask_priority(update, context, lang)
+        await generate_ts(update, context, lang)
 
 
 async def ask_questions(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -472,185 +530,102 @@ async def ask_questions(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     await ask_category(update, context, lang)
 
 
-async def ask_priority(update: Update, context: ContextTypes.DEFAULT_TYPE, lang: str) -> None:
-    """Ask user to select priority (urgency)"""
-    keyboard = [
-        [InlineKeyboardButton(t('priority_low', lang), callback_data='priority_low')],
-        [InlineKeyboardButton(t('priority_normal', lang), callback_data='priority_normal')],
-        [InlineKeyboardButton(t('priority_medium', lang), callback_data='priority_medium')],
-        [InlineKeyboardButton(t('priority_high', lang), callback_data='priority_high')],
-        [InlineKeyboardButton(t('priority_critical', lang), callback_data='priority_critical')],
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-
-    context.user_data['status'] = 'selecting_priority'
-    await update.message.reply_text(t('select_priority', lang), reply_markup=reply_markup)
+async def generate_ts(update: Update, context: ContextTypes.DEFAULT_TYPE, lang: str) -> None:
+    """Ask for deadline via calendar, then generate TS"""
+    await ask_deadline_calendar(update.message, context, lang)
 
 
-async def handle_priority_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle priority selection"""
-    query = update.callback_query
-    await query.answer()
+async def _generate_ts_legacy(update: Update, context: ContextTypes.DEFAULT_TYPE, lang: str) -> None:
+    """Legacy TS generator (kept for reference)"""
+    await update.message.reply_text(t('generating_ts', lang))
 
-    priority_key = query.data
-    priority_value = PRIORITY_MAP.get(priority_key, 5)
-    context.user_data['priority'] = priority_value
-
-    lang = context.user_data.get('lang', 'uk')
-    priority_label = PRIORITY_LABELS.get(lang, PRIORITY_LABELS['en']).get(priority_value, '')
-
-    await query.edit_message_text(text=f"🔥 {priority_label}")
-
-    # Auto-select Odoo project
-    ODOO_PROJECT_ID = 222684
-    ODOO_PROJECT_NAME = 'Odoo'
-    context.user_data['project_id'] = ODOO_PROJECT_ID
-    context.user_data['projects_map'] = {str(ODOO_PROJECT_ID): ODOO_PROJECT_NAME}
-
-    # Ask for deadline
-    context.user_data['status'] = 'waiting_deadline'
-    await query.message.reply_text(t('ask_deadline', lang))
-
-
-async def handle_project_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle project selection"""
-    query = update.callback_query
-    await query.answer()
-
-    project_id = int(query.data.split('_')[1])
-    context.user_data['project_id'] = project_id
-
-    lang = context.user_data.get('lang', 'uk')
-    project_name = context.user_data.get('projects_map', {}).get(str(project_id), '')
-
-    await query.edit_message_text(text=f"📂 {project_name}")
-
-    # Generate TS and show for confirmation
-    await generate_ts_from_query(query, context, lang)
-
-
-async def _generate_and_confirm(message, context: ContextTypes.DEFAULT_TYPE, lang: str) -> None:
-    """Generate TS and show confirmation buttons"""
-    await message.reply_text(t('generating_ts', lang))
-    ts_text = _build_ts_text(context, lang)
-    context.user_data['ts_text'] = ts_text
-    context.user_data['status'] = 'confirming_ts'
-
-    await message.reply_text(t('ts_generated', lang) + ts_text)
-    await _send_confirmation_buttons(message, context, lang)
-
-
-async def generate_ts_from_query(query, context: ContextTypes.DEFAULT_TYPE, lang: str) -> None:
-    """Generate technical specification (called from callback query)"""
-    await _generate_and_confirm(query.message, context, lang)
-
-
-def _extract_title(description: str) -> str:
-    """Extract short title from description (first sentence, max 100 chars)"""
-    # Split by sentence endings
-    for sep in ['. ', '.\n', '! ', '!\n', '? ', '?\n', '\n']:
-        if sep in description:
-            title = description[:description.index(sep)].strip()
-            if len(title) > 10:
-                return title[:100]
-    # If no sentence break, take first 100 chars
-    return description[:100].strip()
-
-
-def _build_ts_text(context: ContextTypes.DEFAULT_TYPE, lang: str) -> str:
-    """Build the TS text for preview in Telegram"""
     description = context.user_data.get('description', '')
+    category = context.user_data.get('category', 'feature')
+    answers = context.user_data.get('answers', {})
     files = context.user_data.get('files', [])
-    priority = context.user_data.get('priority', 5)
-    priority_label = PRIORITY_LABELS.get(lang, PRIORITY_LABELS['en']).get(priority, '')
-    title = _extract_title(description)
-    deadline = context.user_data.get('deadline', '')
 
-    # Preview for Telegram
-    ts_text = f"📌 Тема: {title}\n"
-    ts_text += f"🔥 Пріоритет: {priority_label} ({priority}/10)\n"
-    if deadline:
-        ts_text += f"📅 Термін: {deadline}\n"
-    ts_text += f"\n📝 Опис:\n{description}\n"
+    ts_text = f"""═══════════════════════════════════════
+          ТЕХНІЧНЕ ЗАВДАННЯ
+═══════════════════════════════════════
 
-    links = context.user_data.get('links', [])
-    if links:
-        ts_text += f"\n🔗 Посилання:\n"
-        for link in links:
-            ts_text += f"   • {link}\n"
+📌 КАТЕГОРІЯ: {category.upper()}
+📝 ОПИС: {description}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📌 ДОДАТКОВІ ДЕТАЛІ:
+"""
+
+    questions = CATEGORY_QUESTIONS.get(category, {}).get(lang, [])
+    for idx, question in enumerate(questions):
+        answer = answers.get(idx)
+        if answer:
+            ts_text += f"\n{question}\n➜ {answer}\n"
+
 
     if files:
-        ts_text += f"\n📎 Файли: {len(files)}\n"
+        ts_text += f"\n📎 ФАЙЛИ: {len(files)} файл(и)\n"
         for file_name in files:
             ts_text += f"   • {file_name}\n"
-
-    # Save title separately for Worksection
-    context.user_data['task_title'] = title
-
-    return ts_text
-
-
-def _build_ws_text(context: ContextTypes.DEFAULT_TYPE) -> str:
-    """Build task body for Worksection (description + links + file names)"""
-    description = context.user_data.get('description', '')
-    links = context.user_data.get('links', [])
-    files = context.user_data.get('files', [])
-
-    text = description
-
-    if links:
-        text += "\n\nПосилання:\n"
-        for link in links:
-            text += f"- {link}\n"
-
-    if files:
-        text += "\n\nФайли:\n"
-        for file_name in files:
-            text += f"- {file_name}\n"
-
-    return text
-
-
-async def _send_confirmation_buttons(message, context: ContextTypes.DEFAULT_TYPE, lang: str) -> None:
-    """Send confirmation buttons"""
+    
+    ts_text += "═══════════════════════════════════════"
+    
+    context.user_data['ts_text'] = ts_text
+    context.user_data['status'] = 'confirming_ts'
+    
+    # Send TS and ask for confirmation
+    await update.message.reply_text(t('ts_generated', lang) + ts_text)
+    
     keyboard = [
         [InlineKeyboardButton(t('confirm', lang), callback_data='confirm_ts')],
         [InlineKeyboardButton(t('edit', lang), callback_data='edit_ts')],
         [InlineKeyboardButton(t('cancel', lang), callback_data='cancel_ts')],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await message.reply_text(t('confirm_ts', lang), reply_markup=reply_markup)
+    
+    await update.message.reply_text(t('confirm_ts', lang), reply_markup=reply_markup)
 
 
 async def handle_ts_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle TS confirmation — create task in Worksection"""
+    """Handle TS confirmation"""
     query = update.callback_query
-    await query.answer()
-
-    action = query.data
+    action = query.data.split('_')[0] + '_' + query.data.split('_')[1]
+    
     lang = context.user_data.get('lang', 'uk')
-
+    
     if action == 'confirm_ts':
+        await query.answer()
         context.user_data['status'] = 'creating_task'
-        await query.edit_message_text(text=t('creating_task', lang))
+        await query.edit_message_text(text='⏳ Створюю задачу у Worksection...')
 
-        # Create task in Worksection
-        project_id = context.user_data.get('project_id')
         description = context.user_data.get('description', '')
+        category = context.user_data.get('category', 'feature')
+        answers = context.user_data.get('answers', {})
         priority = context.user_data.get('priority', 5)
-        ws_text = _build_ws_text(context)
-        title = context.user_data.get('task_title', description[:100])
         deadline = context.user_data.get('deadline', '')
+        links = context.user_data.get('links', [])
         file_ids = context.user_data.get('file_ids', [])
+
+        # Use AI-generated title or fallback
+        title = context.user_data.get('task_title') or \
+                description[:100].split('.')[0].split('\n')[0].strip()
+
+        # Build task body
+        questions = CATEGORY_QUESTIONS.get(category, {}).get(lang, [])
+        body = f"Категорія: {category.upper()}\n\n{description}"
+        for idx, q in enumerate(questions):
+            ans = answers.get(idx)
+            if ans:
+                body += f"\n\n{q}\n➜ {ans}"
+        if links:
+            body += "\n\nПосилання:\n" + "\n".join(f"- {l}" for l in links)
 
         # Download files from Telegram
         attach_files = {}
         temp_paths = []
         if file_ids:
-            bot = context.bot
             for idx, (file_id, filename) in enumerate(file_ids):
                 try:
-                    tg_file = await bot.get_file(file_id)
+                    tg_file = await context.bot.get_file(file_id)
                     temp_path = os.path.join(tempfile.gettempdir(), filename)
                     await tg_file.download_to_drive(temp_path)
                     attach_files[f'attach[{idx}]'] = (filename, open(temp_path, 'rb'))
@@ -658,62 +633,57 @@ async def handle_ts_confirmation(update: Update, context: ContextTypes.DEFAULT_T
                 except Exception as e:
                     logger.error(f"Failed to download file {filename}: {e}")
 
-        if project_id:
-            result = ws_api.post_task(
-                id_project=project_id,
-                title=title,
-                text=ws_text,
-                priority=priority,
-                dateend=deadline,
-                files=attach_files if attach_files else None,
+        # Send to Worksection
+        result = ws_api.post_task(
+            id_project=WS_PROJECT_ID,
+            title=title,
+            text=body,
+            priority=priority,
+            dateend=deadline,
+            files=attach_files if attach_files else None,
+        )
+
+        # Cleanup temp files
+        for val in attach_files.values():
+            val[1].close()
+        for path in temp_paths:
+            try:
+                os.remove(path)
+            except:
+                pass
+
+        # Reset task data for next task
+        _reset_task_data(context)
+        context.user_data['status'] = 'waiting_description'
+
+        if result.get('status') == 'ok':
+            task_data = result.get('data', {})
+            task_link = task_data.get('page', '')
+            link_text = f"\n🔗 {task_link}" if task_link else ""
+            await query.message.reply_text(
+                f"✅ Задачу створено у Worksection!\n📂 Проект: {WS_PROJECT_NAME}{link_text}\n\nНова задача? Просто напиши опис."
             )
-
-            # Close file handles and cleanup
-            for key, val in attach_files.items():
-                val[1].close()
-            for path in temp_paths:
-                try:
-                    os.remove(path)
-                except:
-                    pass
-
-            if result.get('status') == 'ok':
-                task_data = result.get('data', {})
-                task_link = task_data.get('page', '')
-                priority_label = PRIORITY_LABELS.get(lang, PRIORITY_LABELS['en']).get(priority, '')
-                project_name = context.user_data.get('projects_map', {}).get(str(project_id), '')
-
-                context.user_data['status'] = 'completed'
-                await query.message.reply_text(
-                    t('task_created', lang, link=task_link, priority=priority_label, project=project_name)
-                )
-            else:
-                error_msg = result.get('message', 'Unknown error')
-                await query.message.reply_text(
-                    t('task_error', lang, error=error_msg)
-                )
         else:
-            # No project selected — save locally as fallback
-            ts_text = context.user_data.get('ts_text', '')
-            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-            filename = f'ts_{timestamp}.txt'
-            with open(filename, 'w', encoding='utf-8') as f:
-                f.write(ts_text)
-
-            context.user_data['status'] = 'completed'
-            await query.message.reply_text(t('ts_confirmed', lang))
-
+            error_msg = result.get('message', 'Unknown error')
+            await query.message.reply_text(
+                f"❌ Помилка при створенні задачі: {error_msg}"
+            )
+        
     elif action == 'edit_ts':
+        await query.answer()
+        _reset_task_data(context)
         context.user_data['status'] = 'waiting_description'
         await query.edit_message_text(text=t('start', lang))
 
     elif action == 'cancel_ts':
+        await query.answer()
+        _reset_task_data(context)
         context.user_data['status'] = 'idle'
         await query.edit_message_text(text=t('ts_cancelled', lang))
 
 
 async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle file and photo uploads"""
+    """Handle file, photo and video uploads"""
     lang = context.user_data.get('lang', 'uk')
 
     if 'files' not in context.user_data:
@@ -723,14 +693,18 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     filename = None
     file_id = None
+
     if update.message.document:
         filename = update.message.document.file_name
         file_id = update.message.document.file_id
     elif update.message.photo:
-        # Photos come as array of sizes, take the largest
         photo = update.message.photo[-1]
         filename = f"photo_{datetime.now().strftime('%H%M%S')}.jpg"
         file_id = photo.file_id
+    elif update.message.video:
+        video = update.message.video
+        filename = video.file_name or f"video_{datetime.now().strftime('%H%M%S')}.mp4"
+        file_id = video.file_id
 
     if filename:
         context.user_data['files'].append(filename)
@@ -740,31 +714,24 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             t('file_uploaded', lang, filename=filename)
         )
 
-        # If photo/file has caption, treat it as description
-        caption = update.message.caption
-        if caption and context.user_data.get('status') == 'waiting_description':
-            context.user_data['description'] = caption
-            await ask_priority(update, context, lang)
-
 
 def main() -> None:
     """Start the bot"""
     if not TELEGRAM_BOT_TOKEN:
         raise ValueError("TELEGRAM_BOT_TOKEN not found in environment variables")
-
+    
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
-
+    
     # Handlers
     application.add_handler(CommandHandler('start', start))
-    application.add_handler(CallbackQueryHandler(handle_language_selection, pattern='^lang_'))
     application.add_handler(CallbackQueryHandler(handle_category_selection, pattern='^category_'))
-    application.add_handler(CallbackQueryHandler(handle_priority_selection, pattern='^priority_'))
-    application.add_handler(CallbackQueryHandler(handle_project_selection, pattern='^project_'))
-    application.add_handler(CallbackQueryHandler(handle_ts_confirmation, pattern='^(confirm_ts|edit_ts|cancel_ts)$'))
+    application.add_handler(CallbackQueryHandler(handle_calendar, pattern='^cal_'))
+    application.add_handler(CallbackQueryHandler(handle_ts_confirmation, pattern='^(confirm|edit|cancel)_'))
     application.add_handler(MessageHandler(filters.Document.ALL, handle_file))
     application.add_handler(MessageHandler(filters.PHOTO, handle_file))
+    application.add_handler(MessageHandler(filters.VIDEO, handle_file))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-
+    
     logger.info("Bot started polling...")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 

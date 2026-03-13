@@ -1,165 +1,159 @@
-"""
-Odoo Analyst AI Agent
-Uses OpenAI GPT-4 for intelligent task analysis and TS generation.
-Uses Whisper for voice message transcription.
-"""
-
 import os
 import logging
-from typing import Optional
-from openai import OpenAI
-from dotenv import load_dotenv
-
-load_dotenv()
+from openai import AsyncOpenAI
 
 logger = logging.getLogger(__name__)
 
-client = OpenAI(api_key=os.getenv('OPENAI_API_KEY'))
+client = AsyncOpenAI(api_key=os.getenv('OPENAI_API_KEY'))
 
-SYSTEM_PROMPT = """You are a senior Odoo ERP analyst and solution architect. Your role is to help users create detailed, developer-ready technical specifications for Odoo tasks.
+SYSTEM_PROMPT = """You are a senior Odoo architect and business analyst with 10+ years of experience.
+You work at a software company and help clarify tasks before passing them to developers.
 
-Your expertise:
-- Odoo modules: Sales, Purchase, Inventory, Accounting, CRM, HR, Manufacturing, Website, eCommerce, Project, Helpdesk
-- Odoo architecture: models, views (form/tree/kanban), actions, security rules, wizards, reports, scheduled actions, API/XML-RPC
-- Python/OWL/QWeb development for Odoo
-- PostgreSQL database structure
-- Odoo customization best practices
+Your expertise includes:
+- Odoo modules: Sale, Purchase, Inventory, Accounting, CRM, HR, Manufacturing, Project
+- Odoo technical stack: ORM, computed fields, onchange, wizards, reports, QWeb, XML-RPC/JSON-RPC
+- Business process analysis and requirements gathering
+- Writing clear, actionable technical specifications
 
-When analyzing a user's request:
-1. Identify which Odoo module(s) are involved
-2. Determine if this is a bug fix, new feature, customization, or configuration
-3. Think about what a developer needs to know to implement this
-
-When asking clarifying questions:
-- Ask 2-3 focused, specific questions
-- Ask about: affected module, current behavior vs expected, user roles, data flow, integrations
-- Do NOT ask obvious questions
-- Be concise
-
-When generating a technical specification:
-- Write a clear title
-- Describe current state and desired state
-- List specific Odoo models/views affected
-- Define acceptance criteria
-- Note any risks or dependencies
-- Structure it so a developer can start working immediately
-
-IMPORTANT: Respond in the SAME LANGUAGE as the user's message."""
+When asking questions: be specific, technical, and focused on what developers need to know.
+When writing specs: be precise, reference exact Odoo models/fields/methods where applicable.
+"""
 
 
-def transcribe_voice(audio_path: str) -> str:
-    """Transcribe voice message using OpenAI Whisper"""
-    try:
-        with open(audio_path, 'rb') as audio_file:
-            transcript = client.audio.transcriptions.create(
-                model="whisper-1",
-                file=audio_file,
-            )
-        return transcript.text
-    except Exception as e:
-        logger.error(f"Whisper transcription failed: {e}")
-        return ''
+async def get_clarifying_questions(description: str, category: str, lang: str) -> list:
+    """Generate 2-3 smart clarifying questions as an Odoo architect."""
 
-
-def analyze_task(description: str, lang: str = 'uk') -> str:
-    """Analyze user's task description and generate clarifying questions"""
-    lang_instructions = {
-        'uk': 'Відповідай українською.',
-        'en': 'Respond in English.',
-        'ru': 'Отвечай на русском.',
-        'pl': 'Odpowiadaj po polsku.',
+    lang_map = {
+        'uk': 'Відповідай виключно українською мовою.',
+        'en': 'Respond exclusively in English.',
+        'ru': 'Отвечай исключительно на русском языке.',
     }
+    lang_instruction = lang_map.get(lang, lang_map['uk'])
+
+    prompt = f"""{lang_instruction}
+
+Ти — Odoo-архітектор. Замовник описав задачу типу "{category}":
+
+"{description}"
+
+Задай 2-3 найважливіших уточнюючих питання, відповіді на які допоможуть програмісту точно зрозуміти що робити.
+
+Вимоги до питань:
+- Конкретні та технічні (стосуються Odoo, бізнес-логіки, або UX)
+- Не запитуй очевидне з опису
+- Фокусуйся на найкритичнішому: які модулі/моделі зачеплені, які edge cases, хто користувач
+
+Поверни ТІЛЬКИ питання — кожне з нового рядка, без нумерації, без зайвого тексту."""
 
     try:
-        response = client.chat.completions.create(
+        response = await client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
-                {"role": "system", "content": SYSTEM_PROMPT + "\n\n" + lang_instructions.get(lang, '')},
-                {"role": "user", "content": f"User described this task:\n\n{description}\n\nAsk 2-3 clarifying questions to create a detailed technical specification. Be concise."}
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": prompt}
             ],
-            max_tokens=500,
-            temperature=0.3,
+            max_tokens=400,
+            temperature=0.7
         )
-        return response.choices[0].message.content
+        text = response.choices[0].message.content.strip()
+        questions = [q.strip() for q in text.split('\n') if q.strip() and len(q.strip()) > 10]
+        return questions[:3]
     except Exception as e:
-        logger.error(f"OpenAI analyze failed: {e}")
-        return ''
+        logger.error(f"AI questions error: {e}")
+        return []
 
 
-def generate_specification(description: str, qa_history: list, lang: str = 'uk') -> dict:
-    """Generate a detailed technical specification based on description and Q&A"""
-    lang_instructions = {
-        'uk': 'Відповідай українською.',
-        'en': 'Respond in English.',
-        'ru': 'Отвечай на русском.',
-        'pl': 'Odpowiadaj po polsku.',
+async def generate_spec(
+    description: str,
+    category: str,
+    questions: list,
+    answers: dict,
+    deadline: str,
+    lang: str
+) -> tuple:
+    """
+    Generate full technical specification.
+    Returns (title, spec_text)
+    """
+
+    lang_map = {
+        'uk': 'Склади ТЗ українською мовою.',
+        'en': 'Write the specification in English.',
+        'ru': 'Составь ТЗ на русском языке.',
     }
+    lang_instruction = lang_map.get(lang, lang_map['uk'])
 
-    # Build conversation context
-    messages = [
-        {"role": "system", "content": SYSTEM_PROMPT + "\n\n" + lang_instructions.get(lang, '')},
-        {"role": "user", "content": f"Initial task description:\n\n{description}"},
-    ]
+    # Build Q&A context
+    qa_block = ""
+    for i, q in enumerate(questions):
+        ans = answers.get(i)
+        if ans:
+            qa_block += f"\nПитання: {q}\nВідповідь: {ans}\n"
 
-    for q, a in qa_history:
-        messages.append({"role": "assistant", "content": q})
-        messages.append({"role": "user", "content": a})
+    deadline_block = f"\nТермін виконання: {deadline}" if deadline else ""
 
-    messages.append({
-        "role": "user",
-        "content": """Now generate a complete technical specification for a developer.
+    prompt = f"""{lang_instruction}
 
-Format:
-TITLE: [short task title]
+Ти — старший Odoo-архітектор. Склади повне технічне завдання для програміста на основі наданої інформації.
 
-DESCRIPTION:
-[detailed description of what needs to be done]
+--- ВХІДНІ ДАНІ ---
+Тип задачі: {category.upper()}
+Опис від замовника: {description}{deadline_block}
 
-AFFECTED MODULES:
-[list of Odoo modules]
+Уточнення:{qa_block if qa_block else ' (не надано)'}
+--- КІНЕЦЬ ВХІДНИХ ДАНИХ ---
 
-CURRENT BEHAVIOR:
-[what happens now]
+Склади ТЗ у такому форматі:
 
-EXPECTED BEHAVIOR:
-[what should happen after implementation]
+**НАЗВА:** [коротка назва задачі, до 80 символів]
 
-TECHNICAL DETAILS:
-[models, views, fields, methods that need changes]
+**МЕТА:**
+[1-2 речення: яку бізнес-проблему вирішує ця задача]
 
-ACCEPTANCE CRITERIA:
-[numbered list of criteria to verify the task is complete]
+**ТЕХНІЧНИЙ ОПИС:**
+[Детально що потрібно зробити в Odoo: які моделі змінити/створити, які поля додати, яку бізнес-логіку реалізувати. Посилайся на конкретні Odoo-моделі (наприклад: sale.order, res.partner, stock.move)]
 
-RISKS/DEPENDENCIES:
-[any risks or dependencies]"""
-    })
+**КРОКИ РЕАЛІЗАЦІЇ:**
+1. [крок]
+2. [крок]
+3. [крок]
+...
+
+**КРИТЕРІЇ ПРИЙНЯТТЯ:**
+- [що має працювати після завершення]
+- [edge cases які мають бути оброблені]
+
+Будь технічним та конкретним. Програміст повинен мати все необхідне для початку роботи."""
 
     try:
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=messages,
-            max_tokens=1500,
-            temperature=0.3,
+        response = await client.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": prompt}
+            ],
+            max_tokens=1800,
+            temperature=0.4
         )
-        content = response.choices[0].message.content
+        spec_text = response.choices[0].message.content.strip()
 
-        # Extract title from response
-        title = ''
-        for line in content.split('\n'):
-            if line.strip().upper().startswith('TITLE:') or line.strip().upper().startswith('НАЗВА:') or line.strip().upper().startswith('НАЗВАНИЕ:') or line.strip().upper().startswith('TYTUŁ:'):
-                title = line.split(':', 1)[1].strip()
+        # Extract title from spec
+        title = description[:80].split('.')[0].split('\n')[0].strip()
+        for line in spec_text.split('\n'):
+            if '**НАЗВА:**' in line or '**NAME:**' in line or '**НАЗВАНИЕ:**' in line or '**TITLE:**' in line:
+                parts = line.split(':', 1)
+                if len(parts) > 1:
+                    extracted = parts[1].strip().strip('*').strip()
+                    if extracted:
+                        title = extracted[:100]
                 break
 
-        if not title:
-            title = description[:100]
+        return title, spec_text
 
-        return {
-            'title': title,
-            'text': content,
-        }
     except Exception as e:
-        logger.error(f"OpenAI generate spec failed: {e}")
-        return {
-            'title': description[:100],
-            'text': description,
-        }
+        logger.error(f"AI spec generation error: {e}")
+        # Fallback: return simple spec
+        fallback = f"Категорія: {category.upper()}\n\nОпис: {description}"
+        if qa_block:
+            fallback += f"\n\nУточнення:{qa_block}"
+        return description[:80], fallback
