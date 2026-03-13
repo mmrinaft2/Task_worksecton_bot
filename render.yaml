@@ -1,0 +1,13 @@
+services:
+  - type: worker
+    name: worksection-telegram-bot
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python main.py
+    envVars:
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: WORKSECTION_API_TOKEN
+        sync: false
+      - key: WS_ACCOUNT_DOMAIN
+        sync: false
