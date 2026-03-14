@@ -20,30 +20,40 @@ When writing specs: be precise, reference exact Odoo models/fields/methods where
 """
 
 
-async def get_clarifying_questions(description: str, category: str, lang: str) -> list:
-    """Generate 2-3 smart clarifying questions as an Odoo architect."""
+async def analyze_and_get_questions(description: str, lang: str) -> tuple:
+    """
+    Analyze task description: auto-detect category and generate 2-3 clarifying questions.
+    Returns (category, questions_list)
+    """
 
     lang_map = {
         'uk': 'Відповідай виключно українською мовою.',
         'en': 'Respond exclusively in English.',
         'ru': 'Отвечай исключительно на русском языке.',
+        'pl': 'Odpowiadaj wyłącznie po polsku.',
     }
     lang_instruction = lang_map.get(lang, lang_map['uk'])
 
     prompt = f"""{lang_instruction}
 
-Ти — Odoo-архітектор. Замовник описав задачу типу "{category}":
+Ти — Odoo-архітектор. Замовник описав задачу:
 
 "{description}"
 
-Задай 2-3 найважливіших уточнюючих питання, відповіді на які допоможуть програмісту точно зрозуміти що робити.
+1. Визнач категорію задачі. Варіанти: bug, feature, improvement, support
+2. Задай 2-3 найважливіших уточнюючих питання, відповіді на які допоможуть програмісту точно зрозуміти що робити.
 
 Вимоги до питань:
 - Конкретні та технічні (стосуються Odoo, бізнес-логіки, або UX)
 - Не запитуй очевидне з опису
 - Фокусуйся на найкритичнішому: які модулі/моделі зачеплені, які edge cases, хто користувач
 
-Поверни ТІЛЬКИ питання — кожне з нового рядка, без нумерації, без зайвого тексту."""
+Формат відповіді (СТРОГО дотримуйся):
+CATEGORY: <одне слово: bug/feature/improvement/support>
+QUESTIONS:
+<питання 1>
+<питання 2>
+<питання 3>"""
 
     try:
         response = await client.chat.completions.create(
@@ -52,15 +62,34 @@ async def get_clarifying_questions(description: str, category: str, lang: str) -
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": prompt}
             ],
-            max_tokens=400,
+            max_tokens=500,
             temperature=0.7
         )
         text = response.choices[0].message.content.strip()
-        questions = [q.strip() for q in text.split('\n') if q.strip() and len(q.strip()) > 10]
-        return questions[:3]
+
+        # Parse category
+        category = 'feature'
+        for line in text.split('\n'):
+            if line.strip().upper().startswith('CATEGORY:'):
+                cat = line.split(':', 1)[1].strip().lower()
+                if cat in ('bug', 'feature', 'improvement', 'support'):
+                    category = cat
+                break
+
+        # Parse questions
+        questions = []
+        in_questions = False
+        for line in text.split('\n'):
+            if line.strip().upper().startswith('QUESTIONS:'):
+                in_questions = True
+                continue
+            if in_questions and line.strip() and len(line.strip()) > 10:
+                questions.append(line.strip())
+
+        return category, questions[:3]
     except Exception as e:
-        logger.error(f"AI questions error: {e}")
-        return []
+        logger.error(f"AI analyze error: {e}")
+        return 'feature', []
 
 
 async def generate_spec(
@@ -80,6 +109,7 @@ async def generate_spec(
         'uk': 'Склади ТЗ українською мовою.',
         'en': 'Write the specification in English.',
         'ru': 'Составь ТЗ на русском языке.',
+        'pl': 'Napisz specyfikację po polsku.',
     }
     lang_instruction = lang_map.get(lang, lang_map['uk'])
 
